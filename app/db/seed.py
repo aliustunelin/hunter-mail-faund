@@ -1,20 +1,15 @@
 # -*- coding: utf-8 -*-
-"""
-Hunter.io Toplu E-Posta Tarayıcı ve BCC Liste Oluşturucu
-"""
+"""Başlangıç kategori/şirket verisini yükler (eski main.py'deki COMPANY_NAMES)."""
 
-import json
-import os
-import time
-import urllib.parse
-import urllib.request
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
-import tavily_service
+from app.core.logging import get_logger
+from app.models.entities import Category, Company
 
-tavily_service.load_env()
-API_KEY = os.environ.get("HUNTER_API_KEY", "api_key")
+logger = get_logger(__name__)
 
-COMPANY_NAMES = {
+SEED_CATEGORIES = {
     "Teknopark Yonetimleri": [
         "Bilisim Vadisi",
         "ODTU Teknokent",
@@ -142,55 +137,32 @@ COMPANY_NAMES = {
 }
 
 
-def fetch_company_emails(domain):
-  url = (
-      f"https://api.hunter.io/v2/domain-search?domain={domain}&api_key={API_KEY}"
-  )
-  req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-  try:
-    with urllib.request.urlopen(req, timeout=10) as response:
-      data = json.loads(response.read().decode("utf-8"))
-      return data.get("data", {}).get("emails", [])
-  except urllib.error.HTTPError as e:
-    if e.code == 429:
-      print("  [!] Rate Limit. 5 sn bekleniyor...")
-      time.sleep(5)
-    else:
-      print(f"  [-] HTTP Hatasi ({domain}): {e.code}")
-    return []
-  except Exception as e:
-    print(f"  [-] Hata ({domain}): {e}")
-    return []
+def run(session_factory: sessionmaker) -> None:
+    """Kategori ve şirketleri idempotent şekilde ekler; var olanları atlar."""
+    db: Session = session_factory()
+    try:
+        added = 0
+        for category_name, company_names in SEED_CATEGORIES.items():
+            category = db.scalars(
+                select(Category).where(Category.name == category_name)
+            ).first()
+            if category is None:
+                category = Category(name=category_name)
+                db.add(category)
+                db.flush()
 
-
-def main():
-  all_emails = []
-  company_domains = tavily_service.find_domains_for_companies(COMPANY_NAMES)
-  total = sum(len(v) for v in company_domains.values())
-  idx = 0
-
-  print(f"\nTarama basliyor... Toplam {total} domain sorgulanacak.\n")
-
-  for cat, domains in company_domains.items():
-    print(f"\n--- {cat} ---")
-    for domain in domains:
-      idx += 1
-      print(f"[{idx}/{total}] {domain} taraniyor...")
-      emails = fetch_company_emails(domain)
-      for item in emails:
-        email_addr = item.get("value")
-        pos = item.get("position") or "Belirtilmemis"
-        if email_addr:
-          all_emails.append(email_addr)
-          print(f"   + {email_addr} ({pos})")
-      time.sleep(0.4)
-
-  unique_emails = sorted(list(set(all_emails)))
-  with open("toplu_bcc_listesi.txt", "w", encoding="utf-8") as f:
-    f.write(", ".join(unique_emails))
-
-  print(f"\n[+] Tamamlandi! {len(unique_emails)} adres toplu_bcc_listesi.txt dosyasina yazildi.")
-
-
-if __name__ == "__main__":
-  main()
+            existing = set(
+                db.scalars(
+                    select(Company.name).where(Company.category_id == category.id)
+                ).all()
+            )
+            for name in company_names:
+                if name in existing:
+                    continue
+                db.add(Company(name=name, category_id=category.id))
+                added += 1
+        db.commit()
+        if added:
+            logger.info("Seed tamamlandi: %d yeni sirket eklendi.", added)
+    finally:
+        db.close()

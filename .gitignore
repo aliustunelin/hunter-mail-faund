@@ -1,3 +1,11 @@
 #.env
+.env
+hunter.db
+hunter.db-shm
+hunter.db-wal
 toplu_bcc_listesi.txt
 __pycache__/
+*.pyc
+.venv/
+venv/
+.zcode/
